@@ -16,128 +16,105 @@ class JustSimpleRigUI(bpy.types.Panel):
     def poll(cls, context):
         obj = context.active_object
         return obj and obj.type == 'ARMATURE' and obj.data.get("Rig ID", "") == "Just Simple Rig"
-    
+
     @staticmethod
     def settings_button(layout, data, prop_name: str, highlight=False, no_text=False, invert_arrow=False):
         is_expanded = getattr(data, prop_name)
         collapsed_arrow = 'TRIA_LEFT' if invert_arrow else 'TRIA_RIGHT'
         arrow = 'TRIA_DOWN' if is_expanded else collapsed_arrow
-        
+
         layout.prop(data, prop_name, icon_only=no_text, icon=arrow, emboss=highlight)
 
     def _get_node_group_from_object(self, object_name: str, node_group_name: str):
-        obj = next((obj for obj in bpy.data.objects if obj.parent == self.object_armature and obj.type == "MESH" and object_name in obj.name), None)
-        
+        obj = None
+        for candidate in bpy.data.objects:
+            if candidate.parent != self.object_armature or candidate.type != "MESH":
+                continue
+            if object_name in candidate.name.partition('.')[0].split():
+                obj = candidate
+                break
+
         if not obj:
             return None, f"{object_name} object not found"
-        
-        material = obj.material_slots[0].material
+
+        material = obj.material_slots[0].material if obj.material_slots else None
         if not material:
             return None, f"{object_name} material not found"
-        
+
         if not material.node_tree:
             return None, f"{object_name} material has no node tree"
 
-        node_group = next((node for node in material.node_tree.nodes if node.type == "GROUP" and node.node_tree and node_group_name in node.node_tree.name), None)
-        if not node_group:
-            return None, f"{object_name} node group not found"
-        
-        return node_group, ""
-    
-    @staticmethod
-    def _get_node_inputs(node_group, input_names: list) -> dict:
-        node_inputs = {}
-        for input in input_names:
-            if input in node_group.inputs:
-                node_inputs[input] = node_group.inputs[input]
+        for node in material.node_tree.nodes:
+            if node.type == "GROUP" and node.node_tree and node_group_name in node.node_tree.name:
+                return node, ""
 
-        return node_inputs
+        return None, f"{object_name} node group not found"
 
-    def update_all_color_inputs(self) -> str:
-        # Eyebrows
-        node_group, error = self._get_node_group_from_object("Eyebrow", "Simplified Eyebrows")
+    def _get_color_inputs(self, object_name, node_group_name, input_names):
+        node_group, error = self._get_node_group_from_object(object_name, node_group_name)
         if error:
-            return error
-        
-        eyebrow_color_names = [
-            "R Eyebrow Color", "L Eyebrow Color"
-        ]
-        self.eyebrows_color_inputs = self._get_node_inputs(node_group, eyebrow_color_names)
-        
-        # Eyes
-        node_group, error = self._get_node_group_from_object("Eye", "Simplified Math Eyes")
-        if error:
-            return error
-        
-        eye_color_names = [
-            "R Eye", "L Eye",
-            "R Iris", "L Iris",
-            "R Pupil", "L Pupil",
-            "R Spark", "L Spark"
-        ]
-        self.eye_color_inputs = self._get_node_inputs(node_group, eye_color_names)
+            raise LookupError(error)
 
-        # Eyelashes
-        node_group, error = self._get_node_group_from_object("Eyelash", "Simplified Math Eyelashes")
-        if error:
-            return error
-        
-        eyelashes_color_names = [
-            "R Eyelash Color", "L Eyelash Color"
-        ]
-        self.eyelash_color_inputs = self._get_node_inputs(node_group, eyelashes_color_names)
-        
-        # Mouth
-        node_group, error = self._get_node_group_from_object("Mouth", "Simplified Math Mouth")
-        if error:
-            return error
-        
-        mouth_color_names = [
-            "Upper Teeth", "Lower Teeth", 
-            "Closed Mouth Color", "Mouth", 
-            "Tongue", "Tongue Color"
-            ]
-        self.mouth_color_inputs = self._get_node_inputs(node_group, mouth_color_names)
-        
-        return ""
+        inputs = {}
+        for name in input_names:
+            if name not in node_group.inputs:
+                raise LookupError(f"{node_group.node_tree.name} input not found: {name}")
+            inputs[name] = node_group.inputs[name]
+        return inputs
 
-    def show_error(self, error: str, detailed_error: str = ""):
-        box = self.layout.box()
+    def _get_settings_bone(self, name):
+        bone = self.object_armature.pose.bones.get(name)
+        if bone is None:
+            raise LookupError(f"{name} bone not found")
+        return bone
+
+    def draw_error(self, layout, error: str, detailed_error: str = ""):
+        box = layout.box()
         box.scale_y = 1.4
         row = box.row()
         row.label(text=f"{error}", icon='ERROR')
 
-        row = box.row()
-        ds_link_op = row.operator("wm.url_open", text="Report to Aspirata's Discord Server", icon='URL')
-        ds_link_op.url = "https://discord.gg/emBFTgjUrz"
-
-        print(detailed_error)
+        if detailed_error:
+            print(detailed_error)
 
     def draw(self, context):
         self.object_armature = context.active_object
         self.armature = self.object_armature.data
         self.ui_props = context.active_object.just_simple_rig_ui_props
-        
-        error = self.update_all_color_inputs()
-        if error:
-            self.show_error(error)
-            return
-
-        self.settings_bones = {n: self.object_armature.pose.bones[n] for n in (
-            "General Settings", "Facial Settings",
-            "L Arm Settings", "R Arm Settings",
-            "L Leg Settings", "R Leg Settings"
-        )}
 
         layout = self.layout
 
         try:
             self.draw_info_section(layout)
+        except LookupError as error:
+            self.draw_error(layout, f"Info: {error}")
+
+        except Exception as error:
+            self.draw_error(layout, f"Info: unexpected UI draw error: {error}", traceback.format_exc())
+
+        try:
             self.draw_general_settings_section(layout)
+        except LookupError as error:
+            self.draw_error(layout, f"General Settings: {error}")
+
+        except Exception as error:
+            self.draw_error(layout, f"General Settings: unexpected UI draw error: {error}", traceback.format_exc())
+
+        try:
             self.draw_facial_settings_section(layout)
+        except LookupError as error:
+            self.draw_error(layout, f"Facial Settings: {error}")
+
+        except Exception as error:
+            self.draw_error(layout, f"Facial Settings: unexpected UI draw error: {error}", traceback.format_exc())
+
+        try:
             self.draw_limbs_settings_section(layout)
-        except Exception as e:
-            self.show_error(f"UI draw error: {e}", traceback.format_exc())
+        except LookupError as error:
+            self.draw_error(layout, f"Limbs Settings: {error}")
+
+        except Exception as error:
+            self.draw_error(layout, f"Limbs Settings: unexpected UI draw error: {error}", traceback.format_exc())
 
     def draw_info_section(self, layout):
         box = layout.box()
@@ -153,44 +130,62 @@ class JustSimpleRigUI(bpy.types.Panel):
         row = box.row(align=True)
         self.settings_button(row, self.ui_props, 'general_settings_expanded')
         if self.ui_props.general_settings_expanded:
+            try:
+                row = box.row()
+                row.prop(self._get_settings_bone("General Settings"), '["Render Bevel"]', text="Bevel")
+                self.settings_button(row, self.ui_props, 'bevel_settings_expanded', True, True, True)
+                if self.ui_props.bevel_settings_expanded:
+                    sbox = box.box()
+                    row = sbox.row()
+                    row.label(text="Bevel Settings:", icon='MOD_BEVEL')
+
+                    row = sbox.row()
+                    row.prop(self._get_settings_bone("General Settings"), '["Viewport Bevel"]', text="Display Bevel in Viewport")
+                    row.enabled = self._get_settings_bone("General Settings")["Render Bevel"]
+
+                    row = sbox.row()
+                    row.prop(self._get_settings_bone("General Settings"), '["Bevel Amount"]')
+                    row.enabled = self._get_settings_bone("General Settings")["Render Bevel"]
+            except LookupError as error:
+                self.draw_error(box, f"Bevel Settings: {error}")
+
+            except Exception as error:
+                self.draw_error(box, f"Bevel Settings: unexpected UI draw error: {error}", traceback.format_exc())
+
+            try:
+                row = box.row()
+                row.prop(self._get_settings_bone("General Settings"), '["Advanced Bones"]')
+                self.settings_button(row, self.ui_props, 'advanced_modes_expanded', True, True, True)
+                if self.ui_props.advanced_modes_expanded:
+                    sbox = box.box()
+                    row = sbox.row()
+                    row.label(text="Advanced Bones:", icon='RESTRICT_VIEW_OFF')
+
+                    try:
+                        row = sbox.row()
+                        row.prop(self._get_settings_bone("Facial Settings"), '["Advanced Face"]', slider=True)
+                        row.enabled = self._get_settings_bone("General Settings")["Advanced Bones"]
+                    except LookupError as error:
+                        self.draw_error(sbox, f"Advanced Face: {error}")
+
+                    except Exception as error:
+                        self.draw_error(sbox, f"Advanced Face: unexpected UI draw error: {error}", traceback.format_exc())
+
+                    row = sbox.row()
+                    row.prop(self._get_settings_bone("General Settings"), '["Advanced Body"]')
+                    row.enabled = self._get_settings_bone("General Settings")["Advanced Bones"]
+            except LookupError as error:
+                self.draw_error(box, f"Advanced Bones: {error}")
+
+            except Exception as error:
+                self.draw_error(box, f"Advanced Bones: unexpected UI draw error: {error}", traceback.format_exc())
+
             row = box.row()
-            row.prop(self.settings_bones["General Settings"], '["Render Bevel"]', text="Bevel")
-            self.settings_button(row, self.ui_props, 'bevel_settings_expanded', True, True, True)
-            if self.ui_props.bevel_settings_expanded:
-                sbox = box.box()
-                row = sbox.row()
-                row.label(text="Bevel Settings:", icon='MOD_BEVEL')
+            row.prop(self._get_settings_bone("General Settings"), '["World Head"]')
 
-                row = sbox.row()
-                row.prop(self.settings_bones["General Settings"], '["Viewport Bevel"]', text="Display Bevel in Viewport")
-                row.enabled = self.settings_bones["General Settings"]["Render Bevel"]
-
-                row = sbox.row()
-                row.prop(self.settings_bones["General Settings"], '["Bevel Amount"]')
-                row.enabled = self.settings_bones["General Settings"]["Render Bevel"]
-
-            row = box.row()
-            row.prop(self.settings_bones["General Settings"], '["Advanced Bones"]')
-            self.settings_button(row, self.ui_props, 'advanced_modes_expanded', True, True, True)
-            if self.ui_props.advanced_modes_expanded:
-                sbox = box.box()
-                row = sbox.row()
-                row.label(text="Advanced Bones:", icon='RESTRICT_VIEW_OFF')
-
-                row = sbox.row()
-                row.prop(self.settings_bones["Facial Settings"], '["Advanced Face"]', slider=True)
-                row.enabled = self.settings_bones["General Settings"]["Advanced Bones"]
-
-                row = sbox.row()
-                row.prop(self.settings_bones["General Settings"], '["Advanced Body"]')
-                row.enabled = self.settings_bones["General Settings"]["Advanced Bones"]
-
-            row = box.row()
-            row.prop(self.settings_bones["General Settings"], '["World Head"]')
-            
             row = box.row()
             row.prop(self.object_armature, '["Display Properties"]')
-            row.prop(self.settings_bones["General Settings"], '["Pixel Size 2x Fix"]')
+            row.prop(self._get_settings_bone("General Settings"), '["Pixel Size 2x Fix"]')
 
 
     def draw_facial_settings_section(self, layout):
@@ -200,185 +195,259 @@ class JustSimpleRigUI(bpy.types.Panel):
         if self.ui_props.facial_settings_expanded:
 
             row = box.row()
-            row.prop(self.settings_bones["Facial Settings"], '["Render Better 2D"]')
-            
-            # Eyebrows
-            row = box.row()
-            row.prop(self.settings_bones["Facial Settings"], '["Eyebrows"]')
-            self.settings_button(row, self.ui_props, 'eyebrows_settings_expanded', True, True, True)
-            if self.ui_props.eyebrows_settings_expanded:
-                sbox = box.box()
-                row = sbox.row()
-                row.label(text="Eyebrows Colors:", icon='IMAGE')
+            row.prop(self._get_settings_bone("Facial Settings"), '["Render Better 2D"]')
 
-                col = sbox.column(align=True)
+            try:
+                # Eyebrows
+                row = box.row()
+                row.prop(self._get_settings_bone("Facial Settings"), '["Eyebrows"]')
+                self.settings_button(row, self.ui_props, 'eyebrows_settings_expanded', True, True, True)
+                if self.ui_props.eyebrows_settings_expanded:
+                    eyebrows_color_inputs = self._get_color_inputs(
+                        "Eyebrow", "Simplified Eyebrows", ["R Eyebrow Color", "L Eyebrow Color"]
+                    )
+                    sbox = box.box()
+                    row = sbox.row()
+                    row.label(text="Eyebrows Colors:", icon='IMAGE')
 
-                row1 = col.row(align=True)
-                row1.prop(self.eyebrows_color_inputs["R Eyebrow Color"], 'default_value', text="")
-                row1.prop(self.eyebrows_color_inputs["L Eyebrow Color"], 'default_value', text="")
-                row1.enabled = self.settings_bones["Facial Settings"]["Eyebrows"]
-
-            # Eyes
-            row = box.row()
-            row.prop(self.settings_bones["Facial Settings"], '["Eyes"]')
-            self.settings_button(row, self.ui_props, 'eyes_settings_expanded', True, True, True)
-            if self.ui_props.eyes_settings_expanded:
-                sbox = box.box()
-                row = sbox.row()
-                row.label(text="Eyes Settings:", icon='MODIFIER_ON')
-
-                tbox = sbox.box()
-                row = tbox.row()
-                row.label(text="Eyes and Iris Colors:", icon='IMAGE')
-                
-                col = tbox.column(align=True)
-                
-                row1 = col.row(align=True)
-                row1.prop(self.eye_color_inputs["R Eye"], 'default_value', text="")
-                row1.prop(self.eye_color_inputs["L Eye"], 'default_value', text="")
-                row1.enabled = self.settings_bones["Facial Settings"]["Eyes"]
-
-                row2 = col.row(align=True)
-                row2.prop(self.eye_color_inputs["R Iris"], 'default_value', text="")
-                row2.prop(self.eye_color_inputs["L Iris"], 'default_value', text="")
-                row2.enabled = self.settings_bones["Facial Settings"]["Eyes"]
-
-                row = sbox.row()
-                row.prop(self.settings_bones["Facial Settings"], '["Eyelashes"]')
-                self.settings_button(row, self.ui_props, 'eyelashes_settings_expanded', True, True, True)
-                if self.ui_props.eyelashes_settings_expanded:
-                    tbox = sbox.box()
-                    row = tbox.row()
-                    row.label(text="Eyelashes Colors:", icon='IMAGE')
-
-                    col = tbox.column(align=True)
+                    col = sbox.column(align=True)
 
                     row1 = col.row(align=True)
-                    row1.prop(self.eyelash_color_inputs["R Eyelash Color"], 'default_value', text="")
-                    row1.prop(self.eyelash_color_inputs["L Eyelash Color"], 'default_value', text="")
-                    row1.enabled = self.settings_bones["Facial Settings"]["Eyelashes"]
-                row.enabled = self.settings_bones["Facial Settings"]["Eyes"]
+                    row1.prop(eyebrows_color_inputs["R Eyebrow Color"], 'default_value', text="")
+                    row1.prop(eyebrows_color_inputs["L Eyebrow Color"], 'default_value', text="")
+                    row1.enabled = self._get_settings_bone("Facial Settings")["Eyebrows"]
+            except LookupError as error:
+                self.draw_error(box, f"Eyebrows: {error}")
 
-                row = sbox.row()
-                row.prop(self.settings_bones["Facial Settings"], '["Pupils"]')
-                self.settings_button(row, self.ui_props, 'pupils_settings_expanded', True, True, True)
-                if self.ui_props.pupils_settings_expanded:
-                    tbox = sbox.box()
-                    row = tbox.row()
-                    row.label(text="Pupils Colors:", icon='IMAGE')
+            except Exception as error:
+                self.draw_error(box, f"Eyebrows: unexpected UI draw error: {error}", traceback.format_exc())
 
-                    col = tbox.column(align=True)
+            try:
+                # Eyes
+                row = box.row()
+                row.prop(self._get_settings_bone("Facial Settings"), '["Eyes"]')
+                self.settings_button(row, self.ui_props, 'eyes_settings_expanded', True, True, True)
+                if self.ui_props.eyes_settings_expanded:
+                    sbox = box.box()
+                    row = sbox.row()
+                    row.label(text="Eyes Settings:", icon='MODIFIER_ON')
 
-                    row1 = col.row(align=True)
-                    row1.prop(self.eye_color_inputs["R Pupil"], 'default_value', text="")
-                    row1.prop(self.eye_color_inputs["L Pupil"], 'default_value', text="")
-                    row1.enabled = self.settings_bones["Facial Settings"]["Pupils"]
+                    try:
+                        eye_color_inputs = self._get_color_inputs(
+                            "Eye", "Simplified Math Eyes", ["R Eye", "L Eye", "R Iris", "L Iris"]
+                        )
+                        tbox = sbox.box()
+                        row = tbox.row()
+                        row.label(text="Eyes and Iris Colors:", icon='IMAGE')
 
-                row.enabled = self.settings_bones["Facial Settings"]["Eyes"]
+                        col = tbox.column(align=True)
 
-                row = sbox.row()
-                row.prop(self.settings_bones["Facial Settings"], '["Sparks"]')
-                self.settings_button(row, self.ui_props, 'sparks_settings_expanded', True, True, True)
-                if self.ui_props.sparks_settings_expanded:
-                    tbox = sbox.box()
-                    row = tbox.row()
-                    row.label(text="Sparks Colors:", icon='IMAGE')
+                        row1 = col.row(align=True)
+                        row1.prop(eye_color_inputs["R Eye"], 'default_value', text="")
+                        row1.prop(eye_color_inputs["L Eye"], 'default_value', text="")
+                        row1.enabled = self._get_settings_bone("Facial Settings")["Eyes"]
 
-                    col = tbox.column(align=True)
+                        row2 = col.row(align=True)
+                        row2.prop(eye_color_inputs["R Iris"], 'default_value', text="")
+                        row2.prop(eye_color_inputs["L Iris"], 'default_value', text="")
+                        row2.enabled = self._get_settings_bone("Facial Settings")["Eyes"]
+                    except LookupError as error:
+                        self.draw_error(sbox, f"Eyes and Iris Colors: {error}")
 
-                    row1 = col.row(align=True)
-                    row1.prop(self.eye_color_inputs["R Spark"], 'default_value', text="")
-                    row1.prop(self.eye_color_inputs["L Spark"], 'default_value', text="")
-                    row1.enabled = self.settings_bones["Facial Settings"]["Sparks"]
-                row.enabled = self.settings_bones["Facial Settings"]["Eyes"]
+                    except Exception as error:
+                        self.draw_error(sbox, f"Eyes and Iris Colors: unexpected UI draw error: {error}", traceback.format_exc())
+
+                    try:
+                        row = sbox.row()
+                        row.prop(self._get_settings_bone("Facial Settings"), '["Eyelashes"]')
+                        self.settings_button(row, self.ui_props, 'eyelashes_settings_expanded', True, True, True)
+                        if self.ui_props.eyelashes_settings_expanded:
+                            eyelash_color_inputs = self._get_color_inputs(
+                                "Eyelash", "Simplified Math Eyelashes", ["R Eyelash Color", "L Eyelash Color"]
+                            )
+                            tbox = sbox.box()
+                            row = tbox.row()
+                            row.label(text="Eyelashes Colors:", icon='IMAGE')
+
+                            col = tbox.column(align=True)
+
+                            row1 = col.row(align=True)
+                            row1.prop(eyelash_color_inputs["R Eyelash Color"], 'default_value', text="")
+                            row1.prop(eyelash_color_inputs["L Eyelash Color"], 'default_value', text="")
+                            row1.enabled = self._get_settings_bone("Facial Settings")["Eyelashes"]
+                        row.enabled = self._get_settings_bone("Facial Settings")["Eyes"]
+                    except LookupError as error:
+                        self.draw_error(sbox, f"Eyelashes: {error}")
+
+                    except Exception as error:
+                        self.draw_error(sbox, f"Eyelashes: unexpected UI draw error: {error}", traceback.format_exc())
+
+                    try:
+                        row = sbox.row()
+                        row.prop(self._get_settings_bone("Facial Settings"), '["Pupils"]')
+                        self.settings_button(row, self.ui_props, 'pupils_settings_expanded', True, True, True)
+                        if self.ui_props.pupils_settings_expanded:
+                            eye_color_inputs = self._get_color_inputs("Eye", "Simplified Math Eyes", ["R Pupil", "L Pupil"])
+                            tbox = sbox.box()
+                            row = tbox.row()
+                            row.label(text="Pupils Colors:", icon='IMAGE')
+
+                            col = tbox.column(align=True)
+
+                            row1 = col.row(align=True)
+                            row1.prop(eye_color_inputs["R Pupil"], 'default_value', text="")
+                            row1.prop(eye_color_inputs["L Pupil"], 'default_value', text="")
+                            row1.enabled = self._get_settings_bone("Facial Settings")["Pupils"]
+
+                        row.enabled = self._get_settings_bone("Facial Settings")["Eyes"]
+                    except LookupError as error:
+                        self.draw_error(sbox, f"Pupils: {error}")
+
+                    except Exception as error:
+                        self.draw_error(sbox, f"Pupils: unexpected UI draw error: {error}", traceback.format_exc())
+
+                    try:
+                        row = sbox.row()
+                        row.prop(self._get_settings_bone("Facial Settings"), '["Sparks"]')
+                        self.settings_button(row, self.ui_props, 'sparks_settings_expanded', True, True, True)
+                        if self.ui_props.sparks_settings_expanded:
+                            eye_color_inputs = self._get_color_inputs("Eye", "Simplified Math Eyes", ["R Spark", "L Spark"])
+                            tbox = sbox.box()
+                            row = tbox.row()
+                            row.label(text="Sparks Colors:", icon='IMAGE')
+
+                            col = tbox.column(align=True)
+
+                            row1 = col.row(align=True)
+                            row1.prop(eye_color_inputs["R Spark"], 'default_value', text="")
+                            row1.prop(eye_color_inputs["L Spark"], 'default_value', text="")
+                            row1.enabled = self._get_settings_bone("Facial Settings")["Sparks"]
+                        row.enabled = self._get_settings_bone("Facial Settings")["Eyes"]
+                    except LookupError as error:
+                        self.draw_error(sbox, f"Sparks: {error}")
+
+                    except Exception as error:
+                        self.draw_error(sbox, f"Sparks: unexpected UI draw error: {error}", traceback.format_exc())
+            except LookupError as error:
+                self.draw_error(box, f"Eyes: {error}")
+
+            except Exception as error:
+                self.draw_error(box, f"Eyes: unexpected UI draw error: {error}", traceback.format_exc())
 
             # Mouth
-            row = box.row()
-            row.prop(self.settings_bones["Facial Settings"], '["Mouth"]')
-            self.settings_button(row, self.ui_props, 'mouth_settings_expanded', True, True, True)
-            if self.ui_props.mouth_settings_expanded:
-                sbox = box.box()
-                row = sbox.row()
-                row.label(text="Mouth Settings:", icon='MODIFIER_ON')
+            try:
+                row = box.row()
+                row.prop(self._get_settings_bone("Facial Settings"), '["Mouth"]')
+                self.settings_button(row, self.ui_props, 'mouth_settings_expanded', True, True, True)
+                if self.ui_props.mouth_settings_expanded:
+                    mouth_color_inputs = self._get_color_inputs(
+                        "Mouth", "Simplified Math Mouth",
+                        ["Upper Teeth", "Lower Teeth", "Closed Mouth Color", "Mouth", "Tongue Color"]
+                    )
+                    sbox = box.box()
+                    row = sbox.row()
+                    row.label(text="Mouth Settings:", icon='MODIFIER_ON')
 
-                row = sbox.row()
-                row.prop(self.settings_bones["Facial Settings"], '["Tongue"]', toggle=True)
-                row.enabled = self.settings_bones["Facial Settings"]["Mouth"]
+                    row = sbox.row()
+                    row.prop(self._get_settings_bone("Facial Settings"), '["Tongue"]', toggle=True)
+                    row.enabled = self._get_settings_bone("Facial Settings")["Mouth"]
 
-                col = sbox.column(align=True)
+                    col = sbox.column(align=True)
 
-                row1 = col.row()
-                row1.prop(self.mouth_color_inputs["Closed Mouth Color"], 'default_value', text="")
-                row1.prop(self.mouth_color_inputs["Upper Teeth"], 'default_value', text="")
-                row1.enabled = self.settings_bones["Facial Settings"]["Mouth"]
+                    row1 = col.row()
+                    row1.prop(mouth_color_inputs["Closed Mouth Color"], 'default_value', text="")
+                    row1.prop(mouth_color_inputs["Upper Teeth"], 'default_value', text="")
+                    row1.enabled = self._get_settings_bone("Facial Settings")["Mouth"]
 
-                row2 = col.row()
-                row2.prop(self.mouth_color_inputs["Mouth"], 'default_value', text="")
-                row2.prop(self.mouth_color_inputs["Lower Teeth"], 'default_value', text="")
-                row2.enabled = self.settings_bones["Facial Settings"]["Mouth"]
+                    row2 = col.row()
+                    row2.prop(mouth_color_inputs["Mouth"], 'default_value', text="")
+                    row2.prop(mouth_color_inputs["Lower Teeth"], 'default_value', text="")
+                    row2.enabled = self._get_settings_bone("Facial Settings")["Mouth"]
 
-                row = sbox.row()
-                row.prop(self.mouth_color_inputs["Tongue Color"], 'default_value', text="")
-                row.enabled = self.settings_bones["Facial Settings"]["Mouth"] and self.settings_bones["Facial Settings"]["Tongue"]
+                    row = sbox.row()
+                    row.prop(mouth_color_inputs["Tongue Color"], 'default_value', text="")
+                    row.enabled = self._get_settings_bone("Facial Settings")["Mouth"] and self._get_settings_bone("Facial Settings")["Tongue"]
+            except LookupError as error:
+                self.draw_error(box, f"Mouth: {error}")
+
+            except Exception as error:
+                self.draw_error(box, f"Mouth: unexpected UI draw error: {error}", traceback.format_exc())
 
     def draw_limbs_settings_section(self, layout):
         box = layout.box()
         row = box.row(align=True)
         self.settings_button(row, self.ui_props, 'limbs_settings_expanded')
         if self.ui_props.limbs_settings_expanded:
-
             # Arms Settings
-            sbox = box.box()
-            row = sbox.row()
-            row.label(text="Arms Settings:", icon='VIEW_PAN')
-            self.settings_button(row, self.ui_props, 'arms_settings_expanded', True, True, True)
-            if self.ui_props.arms_settings_expanded:
+            try:
+                sbox = box.box()
                 row = sbox.row()
-                row.prop(self.settings_bones["General Settings"], '["Alex Arms"]', toggle=True)
-                col = sbox.column(align=True)
+                row.label(text="Arms Settings:", icon='VIEW_PAN')
+                self.settings_button(row, self.ui_props, 'arms_settings_expanded', True, True, True)
+                if self.ui_props.arms_settings_expanded:
+                    try:
+                        row = sbox.row()
+                        row.prop(self._get_settings_bone("General Settings"), '["Alex Arms"]', toggle=True)
+                    except LookupError as error:
+                        self.draw_error(sbox, f"Alex Arms: {error}")
 
-                row1 = col.row()
-                row1.prop(self.settings_bones["R Arm Settings"], '["IK"]', slider=True)
-                row1.prop(self.settings_bones["L Arm Settings"], '["IK"]', slider=True)
-                
-                row2 = col.row()
-                row2_r = row2.row()
-                row2_r.prop(self.settings_bones["R Arm Settings"], '["World IK"]', slider=True)
-                row2_r.enabled = self.settings_bones["R Arm Settings"]["IK"] != 0
+                    except Exception as error:
+                        self.draw_error(sbox, f"Alex Arms: unexpected UI draw error: {error}", traceback.format_exc())
+                    col = sbox.column(align=True)
 
-                row2_l = row2.row()
-                row2_l.prop(self.settings_bones["L Arm Settings"], '["World IK"]', slider=True)
-                row2_l.enabled = self.settings_bones["L Arm Settings"]["IK"] != 0
+                    row1 = col.row()
+                    row1.prop(self._get_settings_bone("R Arm Settings"), '["IK"]', slider=True)
+                    row1.prop(self._get_settings_bone("L Arm Settings"), '["IK"]', slider=True)
+
+                    row2 = col.row()
+                    row2_r = row2.row()
+                    row2_r.prop(self._get_settings_bone("R Arm Settings"), '["World IK"]', slider=True)
+                    row2_r.enabled = self._get_settings_bone("R Arm Settings")["IK"] != 0
+
+                    row2_l = row2.row()
+                    row2_l.prop(self._get_settings_bone("L Arm Settings"), '["World IK"]', slider=True)
+                    row2_l.enabled = self._get_settings_bone("L Arm Settings")["IK"] != 0
+            except LookupError as error:
+                self.draw_error(box, f"Arms Settings: {error}")
+
+            except Exception as error:
+                self.draw_error(box, f"Arms Settings: unexpected UI draw error: {error}", traceback.format_exc())
 
             # Legs Settings
-            sbox = box.box()
-            row = sbox.row()
-            row.label(text="Legs Settings:", icon='BONE_DATA')
-            self.settings_button(row, self.ui_props, 'legs_settings_expanded', True, True, True)
-            if self.ui_props.legs_settings_expanded:
-                col = sbox.column(align=True)
+            try:
+                sbox = box.box()
+                row = sbox.row()
+                row.label(text="Legs Settings:", icon='BONE_DATA')
+                self.settings_button(row, self.ui_props, 'legs_settings_expanded', True, True, True)
+                if self.ui_props.legs_settings_expanded:
+                    col = sbox.column(align=True)
 
-                row1 = col.row()
-                row1_r = row1.row()
-                row1_r.prop(self.settings_bones["R Leg Settings"], '["Knee"]', toggle=True)
-                row1_r.enabled = self.settings_bones["R Leg Settings"]["IK"] != 0
+                    row1 = col.row()
+                    row1_r = row1.row()
+                    row1_r.prop(self._get_settings_bone("R Leg Settings"), '["Knee"]', toggle=True)
+                    row1_r.enabled = self._get_settings_bone("R Leg Settings")["IK"] != 0
 
-                row1_l = row1.row()
-                row1_l.prop(self.settings_bones["L Leg Settings"], '["Knee"]', toggle=True)
-                row1_l.enabled = self.settings_bones["L Leg Settings"]["IK"] != 0
+                    row1_l = row1.row()
+                    row1_l.prop(self._get_settings_bone("L Leg Settings"), '["Knee"]', toggle=True)
+                    row1_l.enabled = self._get_settings_bone("L Leg Settings")["IK"] != 0
 
-                row2 = col.row()
-                row2_r = row2.row()
-                row2_r.prop(self.settings_bones["R Leg Settings"], '["Stretch"]', toggle=True)
-                row2_r.enabled = self.settings_bones["R Leg Settings"]["IK"] != 0
+                    row2 = col.row()
+                    row2_r = row2.row()
+                    row2_r.prop(self._get_settings_bone("R Leg Settings"), '["Stretch"]', toggle=True)
+                    row2_r.enabled = self._get_settings_bone("R Leg Settings")["IK"] != 0
 
-                row2_l = row2.row()
-                row2_l.prop(self.settings_bones["L Leg Settings"], '["Stretch"]', toggle=True)
-                row2_l.enabled = self.settings_bones["L Leg Settings"]["IK"] != 0
+                    row2_l = row2.row()
+                    row2_l.prop(self._get_settings_bone("L Leg Settings"), '["Stretch"]', toggle=True)
+                    row2_l.enabled = self._get_settings_bone("L Leg Settings")["IK"] != 0
 
-                row3 = col.row()
-                row3.prop(self.settings_bones["R Leg Settings"], '["IK"]', slider=True)
-                row3.prop(self.settings_bones["L Leg Settings"], '["IK"]', slider=True)
+                    row3 = col.row()
+                    row3.prop(self._get_settings_bone("R Leg Settings"), '["IK"]', slider=True)
+                    row3.prop(self._get_settings_bone("L Leg Settings"), '["IK"]', slider=True)
+            except LookupError as error:
+                self.draw_error(box, f"Legs Settings: {error}")
+
+            except Exception as error:
+                self.draw_error(box, f"Legs Settings: unexpected UI draw error: {error}", traceback.format_exc())
 
 
 class JustSimpleRigAppend(bpy.types.Operator):
@@ -393,7 +462,7 @@ class JustSimpleRigAppend(bpy.types.Operator):
         if not os.path.exists(blend_file_path):
             self.report({'ERROR'}, f"Rig File not found: {blend_file_path}")
             return {'CANCELLED'}
-        
+
         try:
             with bpy.data.libraries.load(blend_file_path, link=False) as (data_from, data_to):
                 if "Just Simple Rig" not in data_from.collections:
@@ -410,7 +479,7 @@ class JustSimpleRigAppend(bpy.types.Operator):
             if not just_simple_rig_collection:
                 self.report({'WARNING'}, 'Collection "Just Simple Rig" not found in file.')
                 return {'CANCELLED'}
-            
+
             # Append
             active_collection = context.view_layer.active_layer_collection.collection
             active_collection.children.link(just_simple_rig_collection)
@@ -477,6 +546,8 @@ def register():
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_add.remove(add_just_simple_rig_menu)
+
     if hasattr(bpy.types.Object, 'just_simple_rig_ui_props'):
         del bpy.types.Object.just_simple_rig_ui_props
 
